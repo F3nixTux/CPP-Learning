@@ -1,0 +1,87 @@
+name: Build macOS Only
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Prepare tools
+      run: |
+        set -e
+        brew update || true
+        brew install nasm || true
+      shell: bash
+
+    - name: Build C++ and C
+      run: |
+        set -e
+        mkdir -p artifacts/macos/c
+        mkdir -p artifacts/macos/cpp
+        for f in cpp/*.cpp; do [ -f "$f" ] || continue; name=$(basename "${f%.*}"); clang++ -O2 -mmacosx-version-min=10.9 -o "artifacts/macos/cpp/$name" "$f"; done
+        for f in c/*.c; do [ -f "$f" ] || continue; name=$(basename "${f%.*}"); clang -O2 -mmacosx-version-min=10.9 -o "artifacts/macos/c/$name" "$f"; done
+      shell: bash
+
+    - name: Build Java
+      run: |
+        set -e
+        mkdir -p artifacts/macos/java
+        if compgen -G "java/*.java" > /dev/null; then
+          javac java/*.java -d artifacts/macos/java
+        fi
+      shell: bash
+
+    - name: Build TypeScript (if present)
+      run: |
+        set -e
+        if [ -f package.json ]; then
+          npm ci
+          if [ -f tsconfig.json ]; then
+            npx tsc || true
+            mkdir -p artifacts/macos/ts
+            cp -r dist/* artifacts/macos/ts/ 2>/dev/null || true
+          fi
+        fi
+      shell: bash
+
+    - name: Assemble asm (if present)
+      run: |
+        set -e || true
+        mkdir -p artifacts/macos/asm
+        for f in asm/*.s asm/*.asm; do
+          [ -f "$f" ] || continue
+          name=$(basename "${f%.*}")
+          nasm -f macho64 -o /tmp/$name.o "$f" 2>/dev/null || continue
+          clang -o "artifacts/macos/asm/$name" /tmp/$name.o || true
+        done
+      shell: bash
+
+    - name: Package artifacts
+      run: |
+        set -e
+        zip -r build-artifacts-macos.zip artifacts/macos || true
+      shell: bash
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-artifacts-macos
+        path: build-artifacts-macos.zip
