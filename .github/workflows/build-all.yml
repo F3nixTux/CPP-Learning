@@ -1,0 +1,98 @@
+name: Build All Platforms
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Prepare environment
+      run: |
+        set -e
+        if [ "${{ runner.os }}" = "Linux" ]; then
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential nasm mingw-w64 zip
+        elif [ "${{ runner.os }}" = "macOS" ]; then
+          brew update || true
+          brew install nasm || true
+        else
+          choco install -y nasm mingw
+        fi
+      shell: bash
+
+    - name: Build C and C++
+      run: |
+        set -e
+        mkdir -p artifacts/${{ matrix.os }}/c
+        mkdir -p artifacts/${{ matrix.os }}/cpp
+        if [ "${{ runner.os }}" = "Linux" ]; then
+          for f in cpp/*.cpp; do [ -f "$f" ] || continue; name=$(basename "${f%.*}"); g++ -O2 -o "artifacts/${{ matrix.os }}/cpp/$name" "$f"; done
+          for f in c/*.c; do [ -f "$f" ] || continue; name=$(basename "${f%.*}"); gcc -O2 -o "artifacts/${{ matrix.os }}/c/$name" "$f"; done
+        elif [ "${{ runner.os }}" = "macOS" ]; then
+          for f in cpp/*.cpp; do [ -f "$f" ] || continue; name=$(basename "${f%.*}"); clang++ -O2 -mmacosx-version-min=10.9 -o "artifacts/${{ matrix.os }}/cpp/$name" "$f"; done
+          for f in c/*.c; do [ -f "$f" ] || continue; name=$(basename "${f%.*}"); clang -O2 -mmacosx-version-min=10.9 -o "artifacts/${{ matrix.os }}/c/$name" "$f"; done
+        else
+          # Windows (using mingw from choco)
+          export PATH="C:\\tools\\mingw64\\bin:$PATH" || true
+          for f in cpp\\*.cpp; do true; done
+          powershell -Command "Get-ChildItem -Path cpp -Filter *.cpp -File | ForEach-Object { & 'C:/ProgramData/chocolatey/bin/g++.exe' -O2 -static -o \"artifacts/${{ matrix.os }}/cpp/$($_.BaseName).exe\" $_.FullName }"
+          powershell -Command "Get-ChildItem -Path c -Filter *.c -File | ForEach-Object { & 'C:/ProgramData/chocolatey/bin/gcc.exe' -O2 -static -o \"artifacts/${{ matrix.os }}/c/$($_.BaseName).exe\" $_.FullName }"
+        fi
+      shell: bash
+
+    - name: Build Java
+      run: |
+        set -e
+        mkdir -p artifacts/${{ matrix.os }}/java
+        if compgen -G "java/*.java" > /dev/null; then
+          javac java/*.java -d artifacts/${{ matrix.os }}/java
+        fi
+      shell: bash
+
+    - name: Attempt assemble `asm` (optional)
+      run: |
+        set -e || true
+        mkdir -p artifacts/${{ matrix.os }}/asm
+        if [ -d asm ]; then
+          for f in asm/*.s asm/*.asm; do
+            [ -f "$f" ] || continue
+            name=$(basename "${f%.*}")
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              # best-effort: skip or require user tweaking
+              echo "Skipping asm build on Windows runner (manual step recommended)."
+            else
+              nasm -f elf64 -o /tmp/$name.o "$f" 2>/dev/null || nasm -f macho64 -o /tmp/$name.o "$f" 2>/dev/null || continue
+              gcc -no-pie -o "artifacts/${{ matrix.os }}/asm/$name" /tmp/$name.o || true
+            fi
+          done
+        fi
+      shell: bash
+
+    - name: Package artifacts
+      run: |
+        set -e
+        ls -la artifacts || true
+        zip -r build-artifacts-${{ matrix.os }}.zip artifacts/${{ matrix.os }} || true
+      shell: bash
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-artifacts-${{ matrix.os }}
+        path: build-artifacts-${{ matrix.os }}.zip
